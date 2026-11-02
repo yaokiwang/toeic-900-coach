@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="zh-TW">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <title>TOEIC 900 智慧單字教練</title>
+  <style>
+    *{box-sizing:border-box}body{margin:0;background:#000;color:#fff;font:16px system-ui,-apple-system,sans-serif}
+    #app{max-width:430px;min-height:100dvh;margin:auto;background:#111827;padding:20px 20px 90px}
+    h1{text-align:center;font-size:24px}h2{font-size:20px}h3{font-size:17px;margin-top:0}
+    .card{background:#1f2937;border:1px solid #374151;border-radius:16px;padding:20px;margin:18px 0}
+    .row{display:flex;justify-content:space-between;gap:12px;align-items:center}.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+    button,.upload{border:0;border-radius:12px;padding:14px;color:#fff;background:#374151;font:inherit;cursor:pointer;text-align:center}
+    button:disabled{opacity:.45;cursor:default}.primary{background:#2563eb}.green{background:#16a34a}.wide{width:100%;margin:5px 0}
+    input:not([type=file]){width:100%;padding:13px;border-radius:10px;background:#111827;border:1px solid #6b7280;color:white;font:inherit}
+    small,.muted{color:#9ca3af}.error{color:#fecaca}.bar{height:8px;background:#374151;border-radius:8px;overflow:hidden;margin:8px 0 20px}.fill{height:100%;background:#3b82f6}
+    .choice{display:block;width:100%;margin:10px 0;border:1px solid #4b5563;text-align:left}.right{background:#14532d;border-color:#22c55e}.wrong{background:#7f1d1d;border-color:#ef4444}
+    .question{text-align:center;min-height:200px;display:flex;flex-direction:column;align-items:center;justify-content:center}
+    .question strong{font-size:36px}.question p{font-size:20px;line-height:1.5}
+    nav{position:fixed;bottom:0;left:50%;transform:translateX(-50%);width:min(430px,100%);display:flex;justify-content:space-around;background:#111827;border-top:1px solid #374151;padding:8px 8px max(12px,env(safe-area-inset-bottom))}
+    nav button{background:none;padding:8px;color:#9ca3af}nav button.active{color:#60a5fa}.notice{line-height:1.6}.hidden{display:none}
+  </style>
+</head>
+<body><main id="app"></main>
+<script>
+(() => {
+  'use strict';
+  const API_URL='https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent';
+  const KEY='toeic900_v2', oldKey='gemini_api_key', app=document.getElementById('app');
+  const day=()=>{const d=new Date();return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`};
+  const defaults=()=>({vocab:[],difficulty:750,progress:{date:day(),newWords:0,reviews:0},quiz:null});
+  const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const lemma=s=>String(s??'').trim().toLocaleLowerCase('en');
+  const read=(k,fallback)=>{try{return JSON.parse(localStorage.getItem(k))??fallback}catch{return fallback}};
+  let state=read(KEY,null);
+  if(!state||!Array.isArray(state.vocab)) state={vocab:read('toeic_vocab',[]),difficulty:read('toeic_diff',750),progress:read('toeic_progress',defaults().progress),quiz:null};
+  if(!Array.isArray(state.vocab)) state.vocab=[];
+  // A network request cannot survive a reload; leave the saved words intact and retry from Home.
+  if(state.quiz?.loading) state.quiz=null;
+  if(!state.progress||state.progress.date!==day()) state.progress=defaults().progress;
+  if(!Number.isFinite(Number(state.difficulty))) state.difficulty=750;
+  let tab='home', busy=false, apiKey=localStorage.getItem(oldKey)||'';
+  function save(){localStorage.setItem(KEY,JSON.stringify(state))}
+  function nav(){return `<nav><button data-action="home" class="${tab==='home'?'active':''}">🏠<br>首頁</button><button data-action="words" class="${tab==='words'?'active':''}">📚<br>字庫</button><button data-action="settings" class="${tab==='settings'?'active':''}">⚙️<br>設定</button></nav>`}
+  function home(){const p=state.progress;return `<h1>TOEIC 智慧教練</h1><section class="card"><h3>今日學習進度</h3><div class="row"><span>全新單字</span><span>${p.newWords} / 10</span></div><div class="bar"><div class="fill" style="width:${Math.min(100,p.newWords*10)}%"></div></div><div class="row"><span>舊字複習</span><span>${p.reviews} / 10</span></div><div class="bar"><div class="fill" style="width:${Math.min(100,p.reviews*10)}%;background:#22c55e"></div></div></section><div class="grid"><button class="primary" data-action="new" ${p.newWords>=10||busy?'disabled':''}>${p.newWords>=10?'新字已完成':'開始新字學習'}</button><button class="green" data-action="review" ${p.reviews>=10||busy?'disabled':''}>${p.reviews>=10?'複習已完成':'開始舊字複習'}</button></div>${!apiKey?'<p class="card error">請先到設定輸入 Gemini API Key 才能產生新單字。既有字庫仍可複習。</p>':''}${state.quiz?'<button class="wide" data-action="resume">接續未完成測驗</button>':''}`}
+  function options(q,type){const answer=type==='new'?q.translation:q.word, distractors=type==='new'?q.distractors_tw:q.distractors_en;return [...new Set([...distractors,answer].map(String))].sort(()=>Math.random()-.5)}
+  function quiz(){let z=state.quiz;if(!z)return home();if(z.loading)return '<div class="card notice">AI 正在產生題庫，請稍候…</div>';if(z.error)return `<div class="card error">${esc(z.error)}</div><button data-action="retry">返回首頁</button>`;
+    const q=z.questions[z.index];if(!q){state.quiz=null;save();tab='home';return home()}
+    const title=z.type==='new'?'新單字學習':'情境克漏字複習',answer=z.type==='new'?q.translation:q.word;
+    return `<div class="row muted"><span>${title}</span><span>${z.index+1} / ${z.questions.length}</span></div><section class="card question">${z.type==='new'?`<strong>${esc(q.word)}</strong><p class="muted">${esc(q.part_of_speech)}</p><button data-action="speak" data-speech="word">🔊 發音</button>`:`<p>${esc(q.sentence_en)}</p><button data-action="speak" data-speech="sentence">🔊 朗讀</button>`}</section>${z.options.map((o,i)=>`<button class="choice ${z.answered?(o===answer?'right':i===z.selected?'wrong':''):''}" data-action="answer" data-index="${i}" ${z.answered?'disabled':''}>${esc(o)}</button>`).join('')}${z.answered?`<section class="card notice"><strong>${z.correct?'答對了':'再記住這個字'}</strong><p>${esc(q.word)}：${esc(q.translation)}</p><p>${esc(q.sentence_en)}<br><small>${esc(q.sentence_tw)}</small></p></section><button class="primary wide" data-action="next">${z.index+1<z.questions.length?'下一題 →':'完成測驗 ✓'}</button>`:''}`;
+  }
+  function words(){return `<h2>我的字庫 (${state.vocab.length})</h2>${state.vocab.length?state.vocab.slice().reverse().map(v=>`<div class="card"><div class="row"><strong>${esc(v.word)}</strong><small>${v.status==='mastered'?'已掌握':'學習中'}</small></div><p>${esc(v.translation)} <small>(${esc(v.part_of_speech)})</small></p><small>正確率：${v.total_attempts?Math.round((v.correct_attempts||0)/v.total_attempts*100):0}%</small></div>`).join(''):'<p class="muted">尚未建立字庫，請先進行新字學習。</p>'}`}
+  function settings(){return `<h2>系統設定</h2><section class="card"><h3>Gemini API Key</h3><p class="muted notice">此靜態網頁會從你的瀏覽器直接呼叫 Google API。Key 會儲存在目前瀏覽器，使用共用裝置時請勿儲存。</p><input id="key" type="password" autocomplete="off" placeholder="AIzaSy..." value="${esc(apiKey)}"><button class="primary wide" data-action="key">儲存 Key</button><button class="wide" data-action="clearKey">清除 Key</button></section><section class="card"><h3>進度備份管理</h3><button class="wide" data-action="export">📥 匯出學習進度</button><label class="upload wide" style="display:block">📤 匯入學習進度<input id="import" type="file" accept=".json,application/json" class="hidden"></label></section><p class="muted">目前字庫：${state.vocab.length} 字｜難度級別：${esc(state.difficulty)}</p>`}
+  function render(){if(state.progress.date!==day()){state.progress=defaults().progress;save()}app.innerHTML=(tab==='home'?home():tab==='quiz'?quiz():tab==='words'?words():settings())+(tab==='quiz'?'':nav())}
+  function speak(s){if(!window.speechSynthesis)return;const q=state.quiz.questions[state.quiz.index];speechSynthesis.cancel();const u=new SpeechSynthesisUtterance((s==='word'?q.word:q.sentence_en).replace(/____/g,'blank'));u.lang='en-US';speechSynthesis.speak(u)}
+  const validate=o=>o&&typeof o.word==='string'&&typeof o.lemma==='string'&&typeof o.translation==='string'&&typeof o.sentence_en==='string'&&typeof o.sentence_tw==='string'&&Array.isArray(o.distractors_tw)&&Array.isArray(o.distractors_en)&&o.distractors_tw.length===3&&o.distractors_en.length===3&&o.sentence_en.includes('____')&&o.distractors_tw.every(x=>typeof x==='string'&&x!==o.translation)&&o.distractors_en.every(x=>typeof x==='string'&&x!==o.word);
+  async function generate(count){let accepted=[],seen=new Set(state.vocab.map(v=>lemma(v.lemma))),lastError='';
+    for(let attempt=0;attempt<4&&accepted.length<count;attempt++){
+      const prompt=`你是 TOEIC 商務英文命題官。產生 ${count-accepted.length} 個不重複的進階單字，適合約 ${state.difficulty} 分程度。排除 lemma：${[...seen].join(', ')}。只用繁體中文。每筆含 word, lemma, part_of_speech, translation, difficulty, topic, sentence_en（挖空用 ____）, sentence_tw, distractors_tw（三個不同於正解的中文選項）, distractors_en（三個不同於正解的英文選項）。只回傳 JSON 陣列。`;
+      try{const response=await fetch(`${API_URL}?key=${encodeURIComponent(apiKey)}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({contents:[{parts:[{text:prompt}]}],generationConfig:{temperature:.7,responseMimeType:'application/json'}})});
+        if(!response.ok){let detail='';try{detail=(await response.json()).error?.message||''}catch{};throw new Error(`Gemini API ${response.status}${detail?': '+detail:''}`)}
+        const data=await response.json(),raw=data.candidates?.[0]?.content?.parts?.map(p=>p.text||'').join('')||'';
+        const items=JSON.parse(raw.replace(/```json/gi,'').replace(/```/g,'').trim());if(!Array.isArray(items))throw new Error('AI 回傳格式不是陣列');
+        for(const item of items){let id=lemma(item.lemma);if(!validate(item)||!id||seen.has(id))continue;seen.add(id);accepted.push({...item,lemma:id,status:'learning',correct_streak:0,total_attempts:0,correct_attempts:0,created_at:new Date().toISOString(),created_day:day()});if(accepted.length===count)break}
+      }catch(e){lastError=e.message;if(/API 40[13]/.test(lastError))break}
+    }
+    if(!accepted.length)throw new Error(lastError||'AI 未提供有效題目，請稍後再試');return accepted;
+  }
+  function begin(type,questions){state.quiz={type,questions,index:0,options:options(questions[0],type),answered:false,selected:-1};tab='quiz';save();render()}
+  async function startNew(){if(busy||state.progress.newWords>=10)return;if(state.quiz){tab='quiz';render();return}
+    const pending=state.vocab.filter(v=>(v.created_day===day()||v.created_at?.slice(0,10)===day())&&v.total_attempts===0).slice(0,10-state.progress.newWords);
+    if(pending.length){begin('new',pending);return}if(!apiKey){tab='settings';render();return}
+    busy=true;state.quiz={loading:true,type:'new'};tab='quiz';render();try{const items=await generate(10-state.progress.newWords);state.vocab.push(...items);begin('new',items)}catch(e){state.quiz={type:'new',error:e.message};save();render()}finally{busy=false}
+  }
+  function startReview(){if(state.quiz){tab='quiz';render();return}const n=10-state.progress.reviews;if(n<=0)return;const now=Date.now(),due=state.vocab.filter(v=>v.total_attempts>0&&v.next_review_at&&Date.parse(v.next_review_at)<=now).sort((a,b)=>Date.parse(a.next_review_at)-Date.parse(b.next_review_at)).slice(0,n);if(!due.length){alert('目前沒有需要複習的單字！');return}begin('review',due)}
+  function answer(i){const z=state.quiz;if(!z||z.answered||!Number.isInteger(i)||i<0||i>=z.options.length)return;const q=z.questions[z.index],correct=z.options[i]===(z.type==='new'?q.translation:q.word),v=state.vocab.find(x=>lemma(x.lemma)===lemma(q.lemma));if(!v)return;
+    v.total_attempts=(v.total_attempts||0)+1;v.correct_attempts=(v.correct_attempts||0)+(correct?1:0);v.correct_streak=correct?(v.correct_streak||0)+1:0;v.status=v.correct_streak>=5?'mastered':'review';const next=new Date();next.setDate(next.getDate()+(correct?[1,3,7,14,30][Math.min(v.correct_streak-1,4)]:0));v.next_review_at=next.toISOString();
+    if(z.type==='new')state.progress.newWords=Math.min(10,state.progress.newWords+1);else state.progress.reviews=Math.min(10,state.progress.reviews+1);
+    z.answered=true;z.selected=i;z.correct=correct;save();render();
+  }
+  function next(){const z=state.quiz;if(!z?.answered)return;if(z.index+1<z.questions.length){z.index++;z.options=options(z.questions[z.index],z.type);z.answered=false;z.selected=-1}else{state.quiz=null;tab='home';alert('測驗完成！')}save();render()}
+  function exportData(){const blob=new Blob([JSON.stringify({schemaVersion:'2',exportedAt:new Date().toISOString(),vocabData:state.vocab,difficulty:state.difficulty,todayProgress:state.progress},null,2)],{type:'application/json'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=`TOEIC900_backup_${day()}.json`;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000)}
+  app.addEventListener('click',e=>{const b=e.target.closest('[data-action]');if(!b)return;const a=b.dataset.action;if(a==='home'||a==='words'||a==='settings'){tab=a;render()}else if(a==='new')startNew();else if(a==='review')startReview();else if(a==='resume'){tab='quiz';render()}else if(a==='retry'){state.quiz=null;tab='home';save();render()}else if(a==='answer')answer(Number(b.dataset.index));else if(a==='next')next();else if(a==='speak')speak(b.dataset.speech);else if(a==='key'){apiKey=document.getElementById('key').value.trim();localStorage.setItem(oldKey,apiKey);alert('API Key 已儲存');render()}else if(a==='clearKey'){apiKey='';localStorage.removeItem(oldKey);render()}else if(a==='export')exportData()});
+  app.addEventListener('change',async e=>{if(e.target.id!=='import')return;const f=e.target.files[0];if(!f)return;try{const d=JSON.parse(await f.text());if(!Array.isArray(d.vocabData)||!d.vocabData.every(v=>v&&typeof v.word==='string'&&typeof v.lemma==='string'))throw Error();if(!confirm(`匯入 ${d.vocabData.length} 字會取代目前的字庫與進度，確定嗎？`))return;state.vocab=d.vocabData;state.difficulty=Number(d.difficulty)||750;state.progress=d.todayProgress?.date===day()?d.todayProgress:defaults().progress;state.quiz=null;save();render();alert('資料匯入成功')}catch{alert('備份檔案格式錯誤')}});
+  save();render();
+})();
+</script></body></html>
