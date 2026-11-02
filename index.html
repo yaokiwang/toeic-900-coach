@@ -25,7 +25,8 @@
 <script>
 (() => {
   'use strict';
-  const API_URL='https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent';
+  const API_BASE='https://generativelanguage.googleapis.com/v1beta/models/';
+  const MODELS=[{id:'gemini-3.8-flash',label:'3.8 Flash',timeout:25000},{id:'gemini-3.5-flash-lite',label:'3.5 Flash-Lite',timeout:30000}];
   const KEY='toeic900_v2', oldKey='gemini_api_key', app=document.getElementById('app');
   const day=()=>{const d=new Date();return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`};
   const defaults=()=>({vocab:[],difficulty:750,progress:{date:day(),newWords:0,reviews:0},quiz:null});
@@ -44,7 +45,7 @@
   function nav(){return `<nav><button data-action="home" class="${tab==='home'?'active':''}">🏠<br>首頁</button><button data-action="words" class="${tab==='words'?'active':''}">📚<br>字庫</button><button data-action="settings" class="${tab==='settings'?'active':''}">⚙️<br>設定</button></nav>`}
   function home(){const p=state.progress;return `<h1>TOEIC 智慧教練</h1><section class="card"><h3>今日學習進度</h3><div class="row"><span>全新單字</span><span>${p.newWords} / 10</span></div><div class="bar"><div class="fill" style="width:${Math.min(100,p.newWords*10)}%"></div></div><div class="row"><span>舊字複習</span><span>${p.reviews} / 10</span></div><div class="bar"><div class="fill" style="width:${Math.min(100,p.reviews*10)}%;background:#22c55e"></div></div></section><div class="grid"><button class="primary" data-action="new" ${p.newWords>=10||busy?'disabled':''}>${p.newWords>=10?'新字已完成':'開始新字學習'}</button><button class="green" data-action="review" ${p.reviews>=10||busy?'disabled':''}>${p.reviews>=10?'複習已完成':'開始舊字複習'}</button></div>${!apiKey?'<p class="card error">請先到設定輸入 Gemini API Key 才能產生新單字。既有字庫仍可複習。</p>':''}${state.quiz?'<button class="wide" data-action="resume">接續未完成測驗</button>':''}`}
   function options(q,type){const answer=type==='new'?q.translation:q.word, distractors=type==='new'?q.distractors_tw:q.distractors_en;return [...new Set([...distractors,answer].map(String))].sort(()=>Math.random()-.5)}
-  function quiz(){let z=state.quiz;if(!z)return home();if(z.loading)return `<div class="card notice">${esc(z.loadingMessage||'AI 正在產生題庫，請稍候…')}<p class="muted">單次請求最長等待 45 秒；逾時會顯示錯誤，無需一直等待。</p></div>`;if(z.error)return `<div class="card error">${esc(z.error)}</div><button data-action="retry">返回首頁</button>`;
+  function quiz(){let z=state.quiz;if(!z)return home();if(z.loading)return `<div class="card notice">${esc(z.loadingMessage||'AI 正在產生題庫，請稍候…')}<p class="muted">若主要模型暫時無法使用，會自動嘗試備援模型；最後會顯示結果或錯誤原因。</p></div>`;if(z.error)return `<div class="card error">${esc(z.error)}</div><button data-action="retry">返回首頁</button>`;
     const q=z.questions[z.index];if(!q){state.quiz=null;save();tab='home';return home()}
     const title=z.type==='new'?'新單字學習':'情境克漏字複習',answer=z.type==='new'?q.translation:q.word;
     return `<div class="row muted"><span>${title}</span><span>${z.index+1} / ${z.questions.length}</span></div><section class="card question">${z.type==='new'?`<strong>${esc(q.word)}</strong><p class="muted">${esc(q.part_of_speech)}</p><button data-action="speak" data-speech="word">🔊 發音</button>`:`<p>${esc(q.sentence_en)}</p><button data-action="speak" data-speech="sentence">🔊 朗讀</button>`}</section>${z.options.map((o,i)=>`<button class="choice ${z.answered?(o===answer?'right':i===z.selected?'wrong':''):''}" data-action="answer" data-index="${i}" ${z.answered?'disabled':''}>${esc(o)}</button>`).join('')}${z.answered?`<section class="card notice"><strong>${z.correct?'答對了':'再記住這個字'}</strong><p>${esc(q.word)}：${esc(q.translation)}</p><p>${esc(q.sentence_en)}<br><small>${esc(q.sentence_tw)}</small></p></section><button class="primary wide" data-action="next">${z.index+1<z.questions.length?'下一題 →':'完成測驗 ✓'}</button>`:''}`;
@@ -54,22 +55,24 @@
   function render(){if(state.progress.date!==day()){state.progress=defaults().progress;save()}app.innerHTML=(tab==='home'?home():tab==='quiz'?quiz():tab==='words'?words():settings())+(tab==='quiz'?'':nav())}
   function speak(s){if(!window.speechSynthesis)return;const q=state.quiz.questions[state.quiz.index];speechSynthesis.cancel();const u=new SpeechSynthesisUtterance((s==='word'?q.word:q.sentence_en).replace(/____/g,'blank'));u.lang='en-US';speechSynthesis.speak(u)}
   const validate=o=>o&&typeof o.word==='string'&&typeof o.lemma==='string'&&typeof o.translation==='string'&&typeof o.sentence_en==='string'&&typeof o.sentence_tw==='string'&&Array.isArray(o.distractors_tw)&&Array.isArray(o.distractors_en)&&o.distractors_tw.length===3&&o.distractors_en.length===3&&o.sentence_en.includes('____')&&o.distractors_tw.every(x=>typeof x==='string'&&x!==o.translation)&&o.distractors_en.every(x=>typeof x==='string'&&x!==o.word);
-  async function generate(count){let accepted=[],seen=new Set(state.vocab.map(v=>lemma(v.lemma))),lastError='';
-    for(let attempt=0;attempt<2&&accepted.length<count;attempt++){
-      state.quiz.loadingMessage=`AI 正在產生題庫（第 ${attempt+1} / 2 次請求）…`;render();
+  async function generate(count){const accepted=[],seen=new Set(state.vocab.map(v=>lemma(v.lemma))),errors=[];
+    for(let attempt=0;attempt<MODELS.length&&accepted.length<count;attempt++){
+      const model=MODELS[attempt];
+      state.quiz.loadingMessage=`AI 正在產生題庫：${model.label}${attempt?'（備援）':''}…${errors.length?' 前次請求：'+errors.at(-1):''}`;render();
+      if(attempt)await new Promise(resolve=>setTimeout(resolve,1000+Math.random()*500));
       const prompt=`你是 TOEIC 商務英文命題官。產生 ${count-accepted.length} 個不重複的進階單字，適合約 ${state.difficulty} 分程度。排除 lemma：${[...seen].join(', ')}。只用繁體中文。每筆含 word, lemma, part_of_speech, translation, difficulty, topic, sentence_en（挖空用 ____）, sentence_tw, distractors_tw（三個不同於正解的中文選項）, distractors_en（三個不同於正解的英文選項）。只回傳 JSON 陣列。`;
-      const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),45000);
-      try{const response=await fetch(`${API_URL}?key=${encodeURIComponent(apiKey)}`,{method:'POST',headers:{'Content-Type':'application/json'},signal:controller.signal,body:JSON.stringify({contents:[{parts:[{text:prompt}]}],generationConfig:{temperature:.7,responseMimeType:'application/json',thinkingConfig:{thinkingLevel:'low'}}})});
-        if(!response.ok){let detail='';try{detail=(await response.json()).error?.message||''}catch{};throw new Error(`Gemini API ${response.status}${detail?': '+detail:''}`)}
+      const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),model.timeout);
+      try{const response=await fetch(`${API_BASE}${model.id}:generateContent?key=${encodeURIComponent(apiKey)}`,{method:'POST',headers:{'Content-Type':'application/json'},signal:controller.signal,body:JSON.stringify({contents:[{parts:[{text:prompt}]}],generationConfig:{responseMimeType:'application/json',thinkingConfig:{thinkingLevel:'low'}}})});
+        if(!response.ok){let detail='';try{detail=(await response.json()).error?.message||''}catch{};const error=new Error(`HTTP ${response.status}${detail?': '+detail:''}`);error.status=response.status;throw error}
         const data=await response.json(),raw=data.candidates?.[0]?.content?.parts?.map(p=>p.text||'').join('')||'';
         if(!raw)throw new Error(`AI 沒有回傳文字（${data.candidates?.[0]?.finishReason||'原因未提供'}）`);
         const items=JSON.parse(raw.replace(/```json/gi,'').replace(/```/g,'').trim());if(!Array.isArray(items))throw new Error('AI 回傳格式不是陣列');
-        for(const item of items){let id=lemma(item.lemma);if(!validate(item)||!id||seen.has(id))continue;seen.add(id);accepted.push({...item,lemma:id,status:'learning',correct_streak:0,total_attempts:0,correct_attempts:0,created_at:new Date().toISOString(),created_day:day()});if(accepted.length===count)break}
-        if(!accepted.length)lastError='AI 回傳的題目欄位不完整，請重試';
-      }catch(e){lastError=e.name==='AbortError'?'連線逾時（45 秒）。請檢查網路或稍後再試。':e instanceof TypeError?'無法連到 Gemini API。請檢查網路與瀏覽器限制。':e.message;if(/API 4\d\d/.test(lastError)||e.name==='AbortError')break}
+        for(const item of items){const id=lemma(item.lemma);if(!validate(item)||!id||seen.has(id))continue;seen.add(id);accepted.push({...item,lemma:id,status:'learning',correct_streak:0,total_attempts:0,correct_attempts:0,created_at:new Date().toISOString(),created_day:day()});if(accepted.length===count)break}
+        if(!accepted.length)errors.push(`${model.label}：回傳題目欄位不完整`);
+      }catch(e){const reason=e.name==='AbortError'?`逾時（${model.timeout/1000} 秒）`:e instanceof TypeError?'網路連線失敗':e.message;errors.push(`${model.label}：${reason}`);if(e.status>=400&&e.status<500&&e.status!==408&&e.status!==429)break}
       finally{clearTimeout(timer)}
     }
-    if(!accepted.length)throw new Error(lastError||'AI 未提供有效題目，請稍後再試');return accepted;
+    if(!accepted.length)throw new Error(`題庫產生失敗。${errors.join('；')||'AI 未提供有效題目'}。請稍後重試；若持續發生，請檢查 Google AI Studio 的模型存取狀態。`);return accepted;
   }
   function begin(type,questions){state.quiz={type,questions,index:0,options:options(questions[0],type),answered:false,selected:-1};tab='quiz';save();render()}
   async function startNew(){if(busy||state.progress.newWords>=10)return;if(state.quiz){tab='quiz';render();return}
