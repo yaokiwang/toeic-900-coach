@@ -61,22 +61,35 @@
   function speakText(text){if(!window.speechSynthesis)return;speechSynthesis.cancel();const u=new SpeechSynthesisUtterance(String(text).replace(/____/g,'blank'));u.lang='en-US';speechSynthesis.speak(u)}
   function speak(s){const q=state.quiz.questions[state.quiz.index];speakText(s==='word'?q.word:q.sentence_en)}
   const validate=o=>o&&typeof o.word==='string'&&o.word.trim()&&typeof o.lemma==='string'&&o.lemma.trim()&&typeof o.translation==='string'&&o.translation.trim()&&typeof o.sentence_en==='string'&&typeof o.sentence_tw==='string'&&Array.isArray(o.distractors_tw)&&Array.isArray(o.distractors_en)&&o.distractors_tw.length===3&&o.distractors_en.length===3&&o.sentence_en.includes('____')&&o.distractors_tw.every(x=>typeof x==='string'&&x.trim()&&x!==o.translation)&&o.distractors_en.every(x=>typeof x==='string'&&x.trim()&&x!==o.word)&&new Set([...o.distractors_tw,o.translation]).size===4&&new Set([...o.distractors_en,o.word]).size===4;
+  const VOCAB_SCHEMA={type:'array',minItems:1,maxItems:10,items:{type:'object',properties:{word:{type:'string',description:'English target word'},lemma:{type:'string',description:'Dictionary base form of word'},part_of_speech:{type:'string'},translation:{type:'string',description:'Traditional Chinese meaning in Taiwan'},difficulty:{type:'integer'},topic:{type:'string'},sentence_en:{type:'string',description:'Natural business sentence with exactly one ____ in place of the target word'},sentence_tw:{type:'string',description:'Traditional Chinese translation of the full sentence'},distractors_tw:{type:'array',minItems:3,maxItems:3,items:{type:'string'}},distractors_en:{type:'array',minItems:3,maxItems:3,items:{type:'string'}}},required:['word','translation','sentence_en','distractors_tw','distractors_en']}};
+  function normalizeItem(input){if(!input||typeof input!=='object')return {reason:'資料不是單字物件'};
+    const word=typeof input.word==='string'?input.word.trim():'',translation=typeof input.translation==='string'?input.translation.trim():'';
+    const item={...input,word,lemma:lemma(input.lemma||word),translation,part_of_speech:typeof input.part_of_speech==='string'?input.part_of_speech:'',sentence_en:typeof input.sentence_en==='string'?input.sentence_en.trim():'',sentence_tw:typeof input.sentence_tw==='string'?input.sentence_tw.trim():''};
+    if(!word||!translation)return {reason:'缺少單字或中文解釋'};
+    if(!item.sentence_en.includes('____')){const escaped=word.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');item.sentence_en=item.sentence_en.replace(new RegExp(`\\b${escaped}\\b`,'i'),'____')}
+    if(!item.sentence_en.includes('____'))return {reason:'例句沒有挖空位置'};
+    if(!Array.isArray(item.distractors_tw)||!Array.isArray(item.distractors_en))return {reason:'缺少干擾選項'};
+    item.distractors_tw=item.distractors_tw.map(x=>typeof x==='string'?x.trim():x);
+    item.distractors_en=item.distractors_en.map(x=>typeof x==='string'?x.trim():x);
+    if(!validate(item))return {reason:'干擾選項不足或重複'};
+    return {item};
+  }
   async function generate(count,level){const accepted=[],seen=new Set(state.vocab.map(v=>lemma(v.lemma))),errors=[];
     for(let attempt=0;attempt<2&&accepted.length<count;attempt++){
       state.quiz.loadingMessage=`AI 正在產生 ${level} 級題庫：${MODEL.label}${attempt?'（補足題目）':''}…`;render();
-      const prompt=`你是 TOEIC 商務英文命題官。產生恰好 ${count-accepted.length} 個不同基本詞形的新字，目標難度 ${level}（練習級別，不代表實際 TOEIC 成績）。難度要求：${LEVELS[level]} 排除已學與本輪詞形：${[...seen].join(', ')}。選實用商務情境，避免同一基本詞的變形；例句自然且可判斷唯一正解。只用繁體中文。每筆含 word, lemma, part_of_speech, translation, difficulty, topic, sentence_en（挖空用 ____）, sentence_tw, distractors_tw（三個不同於正解且彼此不同的中文選項）, distractors_en（三個不同於正解且彼此不同的英文選項）。只回傳 JSON 陣列。`;
+      const prompt=`你是 TOEIC 商務英文命題官。產生恰好 ${count-accepted.length} 個不同基本詞形的新字，目標難度 ${level}（練習級別，不代表實際 TOEIC 成績）。難度要求：${LEVELS[level]} 排除已學與本輪詞形：${[...seen].join(', ')}。選實用商務情境，避免同一基本詞的變形。每題的 sentence_en 必須有 ____ 代替目標單字，且能從上下文判斷唯一正解；sentence_tw 請翻譯完整句子。兩組 distractors 各有恰好三個不同且不等於正解的選項。所有中文都用繁體中文（台灣）。每題欄位：word, lemma, part_of_speech, translation, difficulty, topic, sentence_en, sentence_tw, distractors_tw, distractors_en。只回傳 JSON 陣列。`;
       const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),MODEL.timeout);
-      try{const response=await fetch(`${API_BASE}${MODEL.id}:generateContent?key=${encodeURIComponent(apiKey)}`,{method:'POST',headers:{'Content-Type':'application/json'},signal:controller.signal,body:JSON.stringify({contents:[{parts:[{text:prompt}]}],generationConfig:{responseMimeType:'application/json',thinkingConfig:{thinkingLevel:'low'}}})});
+      try{const response=await fetch(`${API_BASE}${MODEL.id}:generateContent?key=${encodeURIComponent(apiKey)}`,{method:'POST',headers:{'Content-Type':'application/json'},signal:controller.signal,body:JSON.stringify({contents:[{parts:[{text:prompt}]}],generationConfig:{responseMimeType:'application/json',responseJsonSchema:VOCAB_SCHEMA,thinkingConfig:{thinkingLevel:'low'}}})});
         if(!response.ok){let detail='';try{detail=(await response.json()).error?.message||''}catch{};const error=new Error(`HTTP ${response.status}${detail?': '+detail:''}`);error.status=response.status;throw error}
-        const data=await response.json(),raw=data.candidates?.[0]?.content?.parts?.map(p=>p.text||'').join('')||'';
+        const data=await response.json(),raw=data.candidates?.[0]?.content?.parts?.filter(p=>!p.thought).map(p=>p.text||'').join('')||'';
         if(!raw)throw new Error(`AI 沒有回傳文字（${data.candidates?.[0]?.finishReason||'原因未提供'}）`);
-        const items=JSON.parse(raw.replace(/```json/gi,'').replace(/```/g,'').trim());if(!Array.isArray(items))throw new Error('AI 回傳格式不是陣列');
-        for(const item of items){const id=lemma(item.lemma);if(!validate(item)||!id||seen.has(id))continue;seen.add(id);accepted.push({...item,lemma:id,difficulty:level,status:'learning',correct_streak:0,total_attempts:0,correct_attempts:0,created_at:new Date().toISOString(),created_day:day()});if(accepted.length===count)break}
-        if(!accepted.length)errors.push(`${MODEL.label}：回傳題目欄位不完整`);
+        const parsed=JSON.parse(raw.replace(/```json/gi,'').replace(/```/g,'').trim()),items=Array.isArray(parsed)?parsed:parsed.words||parsed.questions;if(!Array.isArray(items))throw new Error('AI 回傳格式不是題目陣列');
+        const reasons={};for(const input of items){const result=normalizeItem(input);if(!result.item){reasons[result.reason]=(reasons[result.reason]||0)+1;continue}const item=result.item,id=item.lemma;if(seen.has(id)){reasons['與字庫重複']=(reasons['與字庫重複']||0)+1;continue}seen.add(id);accepted.push({...item,difficulty:level,status:'learning',correct_streak:0,total_attempts:0,correct_attempts:0,created_at:new Date().toISOString(),created_day:day()});if(accepted.length===count)break}
+        if(accepted.length<count)errors.push(`收到 ${items.length} 題，已收錄 ${accepted.length} 題；${Object.entries(reasons).map(([name,n])=>`${name} ${n} 題`).join('、')||'數量不足'}`);
       }catch(e){const reason=e.name==='AbortError'?`逾時（${MODEL.timeout/1000} 秒）`:e instanceof TypeError?'網路連線失敗':e.message;errors.push(`${MODEL.label}：${reason}`);if(e.status>=400&&e.status<500&&e.status!==408&&e.status!==429)break}
       finally{clearTimeout(timer)}
     }
-    if(!accepted.length)throw new Error(`題庫產生失敗。${errors.join('；')||'AI 未提供有效題目'}。請稍後重試；若持續發生，請檢查 Google AI Studio 的模型存取狀態。`);return accepted;
+    if(!accepted.length)throw new Error(`題庫產生失敗。${errors.join('；')||'AI 未提供有效題目'}。請稍後重試；若持續發生，請回報這段錯誤文字。`);return accepted;
   }
   function begin(type,questions,level=state.difficulty,challenge=false){state.quiz={type,questions,level,challenge,index:0,options:options(questions[0],type),answered:false,selected:-1};tab='quiz';save();render()}
   async function startNew(challenge=false){if(busy)return;if(state.quiz){tab='quiz';render();return}
