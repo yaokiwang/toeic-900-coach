@@ -28,9 +28,10 @@
   'use strict';
   const API_BASE='https://generativelanguage.googleapis.com/v1beta/models/';
   const MODEL={id:'gemini-3.5-flash-lite',label:'3.5 Flash-Lite',timeout:60000};
-  const APP_VERSION='2.2';
+  const APP_VERSION='2.3';
   const KEY='toeic900_v2', oldKey='gemini_api_key', app=document.getElementById('app');
   const LEVELS={750:'常見 TOEIC 商務字詞；清楚且自然的職場例句；干擾選項意義明顯不同。',800:'較進階的商務與行政字詞；包含合約、營運或人事情境；干擾選項應合理但意思不同。',850:'進階商務字詞與常見抽象用法；例句呈現上下文線索；干擾選項語意相近但只有一個正解。',900:'高階但實用的 TOEIC 商務字詞與精細語意；避免冷僻詞；例句須能明確區分相近選項。'};
+  const TOPICS=['採購、供應鏈與物流','人事、招募與職涯','合約、法務與合規','財務、預算與會計','行銷、客戶服務與業務'];
   const day=()=>{const d=new Date();return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`};
   const defaults=()=>({vocab:[],difficulty:750,progress:{date:day(),newWords:0,reviews:0},quiz:null,history:[],lastLevelChangeAt:null});
   const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -75,23 +76,24 @@
     if(!validate(item))return {reason:'干擾選項不足或重複'};
     return {item};
   }
-  async function generate(count,level){const accepted=[],seen=new Set(state.vocab.map(v=>lemma(v.lemma))),errors=[];
+  async function generate(count,level){const accepted=[],seen=new Set(state.vocab.map(v=>lemma(v.lemma||v.word))),rejectedWords=new Set(),errors=[];
     for(let attempt=0;attempt<5&&accepted.length<count;attempt++){
       const batchSize=Math.min(5,count-accepted.length);
       state.quiz.loadingMessage=`AI 正在產生 ${level} 級題庫：${MODEL.label}（已取得 ${accepted.length}/${count} 題，第 ${attempt+1} 次請求）…`;render();
-      const prompt=`你是 TOEIC 商務英文命題官。本次產生恰好 ${batchSize} 個不同基本詞形的新字，目標難度 ${level}（練習級別，不代表實際 TOEIC 成績）。難度要求：${LEVELS[level]} 排除已學與本輪詞形：${[...seen].join(', ')}。選實用商務情境，避免同一基本詞的變形。每題的 sentence_en 必須有 ____ 代替目標單字，且能從上下文判斷唯一正解；sentence_tw 請翻譯完整句子。兩組 distractors 各有恰好三個不同且不等於正解的選項。所有中文都用繁體中文（台灣）。每題欄位：word, lemma, part_of_speech, translation, difficulty, topic, sentence_en, sentence_tw, distractors_tw, distractors_en。只回傳 JSON 陣列。`;
+      const excluded=[...new Set([...state.vocab.slice(-20).map(v=>lemma(v.lemma||v.word)),...accepted.map(v=>v.lemma),...rejectedWords])].slice(-40);
+      const prompt=`你是 TOEIC 商務英文命題官。本次產生恰好 ${batchSize} 個不同基本詞形的新字。請優先從「${TOPICS[attempt%TOPICS.length]}」領域選字，目標難度 ${level}（練習級別，不代表實際 TOEIC 成績）。難度要求：${LEVELS[level]} 請自行尋找不同於常見教材範例的新字；不要沿用下方排除清單的字，清單僅供排除，不是候選字：${excluded.join(', ')||'無'}。選實用商務情境，避免同一基本詞的變形。每題的 sentence_en 必須有 ____ 代替目標單字，且能從上下文判斷唯一正解；sentence_tw 請翻譯完整句子。兩組 distractors 各有恰好三個不同且不等於正解的選項。所有中文都用繁體中文（台灣）。每題欄位：word, lemma, part_of_speech, translation, difficulty, topic, sentence_en, sentence_tw, distractors_tw, distractors_en。只回傳 JSON 陣列。`;
       const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),MODEL.timeout);
-      try{const response=await fetch(`${API_BASE}${MODEL.id}:generateContent?key=${encodeURIComponent(apiKey)}`,{method:'POST',headers:{'Content-Type':'application/json'},signal:controller.signal,body:JSON.stringify({contents:[{parts:[{text:prompt}]}],generationConfig:{responseMimeType:'application/json',responseJsonSchema:VOCAB_SCHEMA,thinkingConfig:{thinkingLevel:'low'}}})});
+      try{const response=await fetch(`${API_BASE}${MODEL.id}:generateContent?key=${encodeURIComponent(apiKey)}`,{method:'POST',headers:{'Content-Type':'application/json'},signal:controller.signal,body:JSON.stringify({contents:[{parts:[{text:prompt}]}],generationConfig:{responseMimeType:'application/json',responseJsonSchema:VOCAB_SCHEMA,thinkingConfig:{thinkingLevel:'low'},temperature:0.9}})});
         if(!response.ok){let detail='';try{detail=(await response.json()).error?.message||''}catch{};const error=new Error(`HTTP ${response.status}${detail?': '+detail:''}`);error.status=response.status;throw error}
         const data=await response.json(),raw=data.candidates?.[0]?.content?.parts?.filter(p=>!p.thought).map(p=>p.text||'').join('')||'';
         if(!raw)throw new Error(`AI 沒有回傳文字（${data.candidates?.[0]?.finishReason||'原因未提供'}）`);
         const parsed=JSON.parse(raw.replace(/```json/gi,'').replace(/```/g,'').trim()),items=Array.isArray(parsed)?parsed:parsed.words||parsed.questions;if(!Array.isArray(items))throw new Error('AI 回傳格式不是題目陣列');
-        const reasons={};for(const input of items){const result=normalizeItem(input);if(!result.item){reasons[result.reason]=(reasons[result.reason]||0)+1;continue}const item=result.item,id=item.lemma;if(seen.has(id)){reasons['與字庫重複']=(reasons['與字庫重複']||0)+1;continue}seen.add(id);accepted.push({...item,difficulty:level,status:'learning',correct_streak:0,total_attempts:0,correct_attempts:0,created_at:new Date().toISOString(),created_day:day()});if(accepted.length===count)break}
-        if(accepted.length<count)errors.push(`第 ${attempt+1} 次：收到 ${items.length} 題，已收錄 ${accepted.length}/${count} 題；${Object.entries(reasons).map(([name,n])=>`${name} ${n} 題`).join('、')||'數量不足'}`);
+        const reasons={},duplicates=[];for(const input of items){const result=normalizeItem(input);if(!result.item){reasons[result.reason]=(reasons[result.reason]||0)+1;continue}const item=result.item,id=item.lemma;if(seen.has(id)){reasons['與字庫重複']=(reasons['與字庫重複']||0)+1;duplicates.push(item.word);rejectedWords.add(id);continue}seen.add(id);accepted.push({...item,difficulty:level,status:'learning',correct_streak:0,total_attempts:0,correct_attempts:0,created_at:new Date().toISOString(),created_day:day()});if(accepted.length===count)break}
+        if(accepted.length<count)errors.push(`第 ${attempt+1} 次：收到 ${items.length} 題，已收錄 ${accepted.length}/${count} 題；${Object.entries(reasons).map(([name,n])=>`${name} ${n} 題`).join('、')||'數量不足'}${duplicates.length?`（例如 ${duplicates.slice(0,3).join('、')}）`:''}`);
       }catch(e){const reason=e.name==='AbortError'?`逾時（${MODEL.timeout/1000} 秒）`:e instanceof TypeError?'網路連線失敗':e.message;errors.push(`第 ${attempt+1} 次 ${MODEL.label}：${reason}`);if(e.status>=400&&e.status<500&&e.status!==408&&e.status!==429)break}
       finally{clearTimeout(timer)}
     }
-    if(!accepted.length)throw new Error(`題庫產生失敗（${level} 級，版本 ${APP_VERSION}）。${errors.join('；')||'AI 未提供有效題目'}。若持續發生，請回報這段錯誤文字。`);return accepted;
+    if(!accepted.length)throw new Error(`題庫產生失敗（${level} 級，版本 ${APP_VERSION}，字庫 ${state.vocab.length} 字）。${errors.join('；')||'AI 未提供有效題目'}。若持續發生，請回報這段錯誤文字。`);return accepted;
   }
   function begin(type,questions,level=state.difficulty,challenge=false){state.quiz={type,questions,level,challenge,index:0,options:options(questions[0],type),answered:false,selected:-1};tab='quiz';save();render()}
   async function startNew(challenge=false){if(busy)return;if(state.quiz){tab='quiz';render();return}
